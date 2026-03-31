@@ -63,7 +63,11 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/privacy" element={<Privacy />} />
-        <Route path="/login" element={user ? <Navigate to={onboarded ? '/dashboard' : '/setup'} replace /> : <Login onLogin={(u) => setUser(u)} />} />
+        <Route path="/login" element={user ? <Navigate to={onboarded ? '/dashboard' : '/setup'} replace /> : <Login onLogin={async (u) => {
+          const status = await api.onboardingStatus().catch(() => ({ has_credentials: false, has_successful_scrape: false }))
+          setOnboarded(status.has_successful_scrape)
+          setUser(u)
+        }} />} />
         <Route path="/setup" element={
           <Guard ok={!!user} redirectTo="/login">
             <Onboarding onScrapeSuccess={() => setOnboarded(true)} />
