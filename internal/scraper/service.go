@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -381,6 +382,10 @@ func (s *ScraperService) LoadCredentials(ctx context.Context, userID uuid.UUID) 
 }
 
 func (s *ScraperService) pullImage(ctx context.Context) error {
+	// Skip pull for local images (no registry prefix)
+	if !strings.Contains(s.scraperImage, "/") {
+		return nil
+	}
 	s.pullMu.Lock()
 	defer s.pullMu.Unlock()
 	if time.Since(s.lastPull) < pullInterval {
