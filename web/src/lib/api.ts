@@ -50,6 +50,17 @@ export interface OnboardingStatus {
   has_successful_scrape: boolean
 }
 
+// Cache a promise so concurrent/repeated calls share one in-flight request.
+const cache = new Map<string, Promise<unknown>>()
+function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  let p = cache.get(key) as Promise<T> | undefined
+  if (!p) {
+    p = fn().catch(err => { cache.delete(key); throw err })
+    cache.set(key, p)
+  }
+  return p
+}
+
 function handleBotBarrier(): never {
   sessionStorage.setItem('returnPath', window.location.pathname + window.location.search)
   window.location.href = '/'
@@ -80,7 +91,7 @@ async function request<T>(path: string, options: RequestInit = {}, redirectOn401
 }
 
 export const api = {
-  config: () => request<{ dev_mode: boolean; commit_sha: string; commit_url: string }>('/api/config', {}, false),
+  config: () => cached('config', () => request<{ dev_mode: boolean; commit_sha: string; commit_url: string }>('/api/config', {}, false)),
   auth: {
     requestPin: (email: string) =>
       request('/api/auth/request-pin', { method: 'POST', body: JSON.stringify({ email }) }),
@@ -98,7 +109,7 @@ export const api = {
   },
   schedule: {
     get: () => request<ScheduleResponse>('/api/schedule'),
-    icsUrl: () => request<{ url: string }>('/api/calendar/ics-url'),
+    icsUrl: () => cached('icsUrl', () => request<{ url: string }>('/api/calendar/ics-url')),
   },
   account: {
     delete: () => request('/api/account', { method: 'DELETE' }),
