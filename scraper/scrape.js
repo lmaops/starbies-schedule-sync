@@ -314,8 +314,16 @@ async function run() {
     await page.goto(STARBUCKS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
     await takeScreenshot(page, 'login-page');
 
-    // Handle SAS Level 3 login if present
-    const pageTitle = await page.title().catch(() => '');
+    // Check if we're on the SAS Level 3 login page
+    // Retry title fetch — page context may still be settling after redirect
+    let pageTitle = '';
+    try {
+      pageTitle = await page.title();
+    } catch (_) {
+      await delay(500);
+      pageTitle = await page.title().catch(() => '');
+    }
+
     if (pageTitle.includes('SAS - Level 3')) {
       await handleSASLogin(page, username);
       await takeScreenshot(page, 'after-sas-username');
