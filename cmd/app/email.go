@@ -7,10 +7,6 @@ import (
 	"strconv"
 )
 
-func isDevMode() bool {
-	return os.Getenv("SMTP_HOST") == ""
-}
-
 func sendPINEmail(to, pin string) error {
 	host := os.Getenv("SMTP_HOST")
 	portStr := os.Getenv("SMTP_PORT")
@@ -19,10 +15,6 @@ func sendPINEmail(to, pin string) error {
 	from := os.Getenv("SMTP_FROM")
 	if from == "" {
 		from = user
-	}
-
-	if host == "" {
-		return nil
 	}
 
 	port, _ := strconv.Atoi(portStr)

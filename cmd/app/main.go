@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/liz/sbuxsync/internal/auth"
@@ -11,13 +13,25 @@ import (
 	"github.com/liz/sbuxsync/internal/scraper"
 )
 
+// defaultInternalCIDRs covers loopback and standard private/Docker ranges.
+var defaultInternalCIDRs = []string{
+	"127.0.0.0/8",
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"::1/128",
+	"fc00::/7",
+}
+
 func main() {
 	ctx := context.Background()
 
 	dbPath := getEnv("DB_PATH", "sbuxsync.db")
 	mekHex := requireEnv("MEK")
+	requireEnv("SMTP_HOST")
 	scraperImage := getEnv("SCRAPER_IMAGE", "sbuxsync-scraper-module:latest")
 	scraperCallbackURL := getEnv("SCRAPER_CALLBACK_URL", "http://app:8080")
+	internalCIDRs := parseInternalCIDRs(os.Getenv("INTERNAL_CIDR_ALLOWLIST"))
 
 	db, err := database.Connect(dbPath)
 	if err != nil {
@@ -50,12 +64,36 @@ func main() {
 	scraperSvc := scraper.NewScraperService(db, mekHex, scraperImage, scraperCallbackURL)
 	go scraperSvc.RunScheduler(ctx)
 
-	server := NewServer(db, mekHex, scraperSvc, pinStore, pinRequestRL, pinVerifyRL, credentialRL, scrapeRL, icsRL)
+	server := NewServer(db, mekHex, scraperSvc, pinStore, pinRequestRL, pinVerifyRL, credentialRL, scrapeRL, icsRL, internalCIDRs)
 	addr := ":8080"
 	log.Printf("app service listening on %s", addr)
 	if err := server.Run(addr); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func parseInternalCIDRs(env string) []*net.IPNet {
+	var strs []string
+	if env != "" {
+		for _, s := range strings.Split(env, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				strs = append(strs, s)
+			}
+		}
+	}
+	if len(strs) == 0 {
+		strs = defaultInternalCIDRs
+	}
+	nets := make([]*net.IPNet, 0, len(strs))
+	for _, s := range strs {
+		_, cidr, err := net.ParseCIDR(s)
+		if err != nil {
+			log.Fatalf("invalid CIDR in INTERNAL_CIDR_ALLOWLIST: %q: %v", s, err)
+		}
+		nets = append(nets, cidr)
+	}
+	return nets
 }
 
 func getEnv(key, fallback string) string {

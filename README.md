@@ -19,9 +19,68 @@ Credentials are encrypted at rest with AES-256-GCM. Each user has a per-user dat
 - **`internal/`** - auth, crypto, calendar, database, scraper packages
 - **SQLite** - single-file database, no separate server needed
 
-## Developer setup
+## Self-hosting (Docker)
 
-**Prerequisites:** Go 1.22+, Node.js 20+, Docker
+**Prerequisites:** Docker + Docker Compose, a domain name, SMTP credentials
+
+### 1. Clone and configure
+
+```sh
+git clone <repo-url>
+cd sbuxslavehrs-web
+cp .env.example .env
+```
+
+Edit `.env` and set:
+- `DOMAIN` - your domain name
+- `MEK` - generate with `openssl rand -hex 32`
+- `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` - your SMTP credentials for sending PIN emails
+
+### 2. Create the scraper network
+
+Scraper containers run on a dedicated network:
+
+```sh
+docker network create scraper-exec
+```
+
+### 3. Start the app
+
+```sh
+mkdir -p data
+docker compose up -d --build
+```
+
+This builds and starts the app. The scraper uses the public image `ghcr.io/lmaops/sbuxsync-scraper:main` by default, which auto-updates to the latest version.
+
+The app listens on `127.0.0.1:8080`. Put a reverse proxy (Caddy, Nginx) in front for TLS.
+
+**Caddy example** (`Caddyfile`):
+
+```
+schedules.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+### Updating
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+The scraper image (`ghcr.io/lmaops/sbuxsync-scraper:main`) will be pulled automatically; it tracks the `main` branch and updates when you restart.
+
+### Data
+
+The SQLite database is stored in `./data/` (mounted as a volume). Back this directory up regularly.
+
+---
+
+## Developer setup (local build)
+
+**Prerequisites:** Go 1.22+, Node.js 20+, Docker, SMTP credentials
 
 ### 1. Configure environment
 
@@ -35,7 +94,7 @@ Generate a master encryption key and add it to `.env`:
 openssl rand -hex 32
 ```
 
-Leave `SMTP_HOST` blank to enable insecure single-user mode. This should not be used on a public port.
+You must also configure SMTP credentials for sending PIN emails.
 
 ### 2. Build the scraper image
 
@@ -70,84 +129,21 @@ cd web && npm run dev
 # open http://localhost:5173
 ```
 
-## Self-hosting
-
-**Prerequisites:** Docker + Docker Compose, a domain name, SMTP credentials (optional - without them only a single dev-mode user can log in)
-
-### 1. Clone and configure
-
-```sh
-git clone <repo-url>
-cp .env.example .env
-```
-
-Edit `.env` - see [environment variables](#environment-variables) below.
-
-### 2. Create the scraper network
-
-Scraper containers run on a dedicated network isolated from the main app:
-
-```sh
-docker network create sbuxsync_scraper-exec
-```
-
-### 3. Build the scraper image
-
-```sh
-docker build -t sbuxsync-scraper-module:latest scraper/
-```
-
-### 4. Start the app
-
-```sh
-mkdir -p data
-docker compose up -d --build
-```
-
-The app listens on `127.0.0.1:8080`. Put a reverse proxy (Nginx, Caddy) in front for TLS.
-
-**Nginx example:**
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name schedules.example.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-### Updating
-
-```sh
-git pull
-docker build -t sbuxsync-scraper-module:latest scraper/
-docker compose up -d --build
-```
-
-### Data
-
-The SQLite database is stored in `./data/` (mounted as a volume). Back this directory up regularly.
+---
 
 ## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `DOMAIN` | - | Your domain name (e.g. `schedules.example.com`) |
-| `DB_PATH` | `sbuxsync.db` | Path to SQLite database file |
 | `MEK` | **required** | 64-char hex master encryption key (`openssl rand -hex 32`) |
-| `SCRAPER_IMAGE` | `sbuxsync-scraper-module:latest` | Scraper Docker image name |
-| `SCRAPER_CALLBACK_URL` | `http://app:8080` | URL the scraper uses to call back to the app |
-| `BASE_URL` | `http://localhost:8080` | Public base URL (used to generate ICS feed URLs) |
-| `SMTP_HOST` | - | SMTP hostname - leave blank for dev mode |
+| `SMTP_HOST` | **required** | SMTP hostname |
 | `SMTP_PORT` | `587` | SMTP port |
 | `SMTP_USER` | - | SMTP username |
 | `SMTP_PASS` | - | SMTP password |
 | `SMTP_FROM` | `SMTP_USER` | From address for PIN emails |
+| `SCRAPER_IMAGE` | `ghcr.io/lmaops/sbuxsync-scraper:main` | Scraper Docker image. Use the public image for auto-updates, or build locally with `make build-scraper` and set to `sbuxsync-scraper-module:latest` |
+| `INTERNAL_CIDR_ALLOWLIST` | default private ranges | Comma-separated CIDR ranges allowed to access /internal endpoints. Defaults to: `127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, ::1/128, fc00::/7` |
 
 ## Makefile targets
 
