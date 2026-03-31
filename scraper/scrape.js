@@ -195,12 +195,22 @@ async function run() {
 
     // Step 2: Wait for auth / bypass push notification
     log('Waiting for authentication...');
-    const targetDomain = 'starbucks-wfmr.jdadelivers.com';
+    const loginPath = '/retail/rp/login';
     const maxWait = 60000;
     const start = Date.now();
 
+    let lastUrl = '';
     while (Date.now() - start < maxWait) {
-      if (page.url().includes(targetDomain)) {
+      const currentUrl = page.url();
+      if (currentUrl !== lastUrl) {
+        log(`Auth page: ${currentUrl}`);
+        lastUrl = currentUrl;
+      }
+
+      // Auth is complete when we've left the login page (and any SSO intermediaries)
+      const onLoginPage = currentUrl.includes(loginPath);
+      const onSSOPage = currentUrl.includes('sas.') || currentUrl.includes('/adfs/') || currentUrl.includes('/oauth2/');
+      if (!onLoginPage && !onSSOPage && currentUrl.includes('starbucks-wfmr.jdadelivers.com')) {
         log('Authenticated successfully');
         break;
       }
@@ -238,6 +248,12 @@ async function run() {
       await delay(500);
     }
 
+    if (Date.now() - start >= maxWait) {
+      log(`Auth timed out after ${maxWait}ms. Final URL: ${page.url()}`);
+      throw new Error(`Authentication timed out after ${maxWait}ms`);
+    }
+
+    log(`Post-auth URL: ${page.url()}`);
     await takeScreenshot(page, 'post-auth');
 
     // Step 3: Navigate to schedule page
@@ -246,6 +262,9 @@ async function run() {
 
     log('Navigating to schedule page...');
     await page.evaluate(url => { window.location.href = url; }, STARBUCKS_SCHEDULE_URL);
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    log(`Schedule page URL: ${page.url()}`);
+    await takeScreenshot(page, 'pre-schedule-wait');
 
     await page.waitForSelector('#button-1028', { visible: true, timeout: 15000 });
     await page.waitForSelector('#button-1029', { visible: true, timeout: 15000 });
