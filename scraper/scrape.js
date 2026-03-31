@@ -44,12 +44,6 @@ const log = (...args) => {
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-async function submitForm(page) {
-  const btn = await page.$('input[type="submit"], button[type="submit"], button');
-  const trigger = btn ? btn.click() : page.keyboard.press('Enter');
-  await Promise.all([trigger, page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
-}
-
 async function takeScreenshot(page, label) {
   try {
     const b64 = await page.screenshot({ encoding: 'base64', type: 'png' });
@@ -149,8 +143,8 @@ async function run() {
     ],
   });
 
-  const page = await browser.newPage();
   try {
+    const page = await browser.newPage();
     const capturedWeeks = [];
 
     // Intercept schedule API responses
@@ -189,28 +183,23 @@ async function run() {
       if (!inputField) throw new Error('Could not find username input on SAS page');
 
       await inputField.type(username, { delay: 50 });
-      await submitForm(page);
+      const submitBtn = await page.$('input[type="submit"], button[type="submit"], button');
+      if (submitBtn) {
+        await Promise.all([submitBtn.click(), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+      } else {
+        await Promise.all([page.keyboard.press('Enter'), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+      }
       await takeScreenshot(page, 'after-sas-username');
     }
 
     // Step 2: Wait for auth / bypass push notification
     log('Waiting for authentication...');
-    const loginPath = '/retail/rp/login';
+    const targetDomain = 'starbucks-wfmr.jdadelivers.com';
     const maxWait = 60000;
     const start = Date.now();
 
-    let lastUrl = '';
     while (Date.now() - start < maxWait) {
-      const currentUrl = page.url();
-      if (currentUrl !== lastUrl) {
-        log(`Auth page: ${currentUrl}`);
-        lastUrl = currentUrl;
-      }
-
-      // Auth is complete when we've left the login page (and any SSO intermediaries)
-      const onLoginPage = currentUrl.includes(loginPath);
-      const onSSOPage = currentUrl.includes('sas.') || currentUrl.includes('/adfs/') || currentUrl.includes('/oauth2/');
-      if (!onLoginPage && !onSSOPage && currentUrl.includes('starbucks-wfmr.jdadelivers.com')) {
+      if (page.url().includes(targetDomain)) {
         log('Authenticated successfully');
         break;
       }
@@ -234,26 +223,32 @@ async function run() {
         const secField = await page.$('input[type="password"]');
         await secField.type(answer, { delay: 50 });
         await takeScreenshot(page, 'security-question');
-        await submitForm(page);
+
+        const btn1 = await page.$('input[type="submit"], button[type="submit"], button');
+        if (btn1) {
+          await Promise.all([btn1.click(), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+        } else {
+          await Promise.all([page.keyboard.press('Enter'), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+        }
 
         await page.waitForSelector('input[type="password"]', { visible: true, timeout: 15000 });
         log('Entering password...');
         const pwField = await page.$('input[type="password"]');
         await pwField.type(password, { delay: 50 });
         await takeScreenshot(page, 'password-entry');
-        await submitForm(page);
+
+        const btn2 = await page.$('input[type="submit"], button[type="submit"], button');
+        if (btn2) {
+          await Promise.all([btn2.click(), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+        } else {
+          await Promise.all([page.keyboard.press('Enter'), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })]);
+        }
         break;
       }
 
       await delay(500);
     }
 
-    if (Date.now() - start >= maxWait) {
-      log(`Auth timed out after ${maxWait}ms. Final URL: ${page.url()}`);
-      throw new Error(`Authentication timed out after ${maxWait}ms`);
-    }
-
-    log(`Post-auth URL: ${page.url()}`);
     await takeScreenshot(page, 'post-auth');
 
     // Step 3: Navigate to schedule page
@@ -262,9 +257,6 @@ async function run() {
 
     log('Navigating to schedule page...');
     await page.evaluate(url => { window.location.href = url; }, STARBUCKS_SCHEDULE_URL);
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    log(`Schedule page URL: ${page.url()}`);
-    await takeScreenshot(page, 'pre-schedule-wait');
 
     await page.waitForSelector('#button-1028', { visible: true, timeout: 15000 });
     await page.waitForSelector('#button-1029', { visible: true, timeout: 15000 });
@@ -307,9 +299,6 @@ async function run() {
     });
     log('Shifts submitted to API successfully');
 
-  } catch (err) {
-    await takeScreenshot(page, 'error');
-    throw err;
   } finally {
     await browser.close();
   }
