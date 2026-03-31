@@ -1,0 +1,21 @@
+.env
+*.env.local
+web/node_modules/
+web/dist/
+scraper/node_modules/
+bin/
+/app
+*.log
+cmd/app/static/
+data/
+
+# ai tools
+.claude/
+.opencode/
+opencode.json
+.cursor/
+.windsurf/
+.copilot/
+.cody/
+.continue/
+.aider*

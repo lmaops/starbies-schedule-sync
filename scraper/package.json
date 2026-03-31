@@ -1,0 +1,12 @@
+{
+  "name": "sbuxsync-scraper",
+  "version": "1.0.0",
+  "description": "Starbucks schedule scraper module for sbuxsync",
+  "main": "scrape.js",
+  "scripts": {
+    "start": "node scrape.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.11.1"
+  }
+}
