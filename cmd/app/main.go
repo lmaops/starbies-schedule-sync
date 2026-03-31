@@ -58,7 +58,7 @@ func main() {
 	scrapeRL := auth.NewRateLimiter(10, 48*time.Hour) // per-user: 10 scrapes per 48h
 	defer scrapeRL.Close()
 
-	icsRL := auth.NewRateLimiter(30, time.Minute) // per-IP: prevent ICS token brute-force
+	icsRL := auth.NewRateLimiter(5, time.Minute) // per-IP: prevent ICS token brute-force
 	defer icsRL.Close()
 
 	scraperSvc := scraper.NewScraperService(db, mekHex, scraperImage, scraperCallbackURL)
