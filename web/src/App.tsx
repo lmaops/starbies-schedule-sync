@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect, useState, useRef } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { api, type User } from '@/lib/api'
 import Login from '@/pages/Login'
 import Onboarding from '@/pages/Onboarding'
@@ -8,6 +8,21 @@ import Settings from '@/pages/Settings'
 import Admin from '@/pages/Admin'
 import Landing from '@/pages/Landing'
 import Privacy from '@/pages/Privacy'
+
+function ReturnPathRedirect() {
+  const navigate = useNavigate()
+  const checked = useRef(false)
+  useEffect(() => {
+    if (checked.current) return
+    checked.current = true
+    const returnPath = sessionStorage.getItem('returnPath')
+    if (returnPath && returnPath !== '/' && returnPath !== window.location.pathname) {
+      sessionStorage.removeItem('returnPath')
+      navigate(returnPath, { replace: true })
+    }
+  }, [navigate])
+  return null
+}
 
 function Guard({ ok, redirectTo, children }: { ok: boolean; redirectTo: string; children: React.ReactNode }) {
   if (!ok) return <Navigate to={redirectTo} replace />
@@ -44,6 +59,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <ReturnPathRedirect />
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/privacy" element={<Privacy />} />

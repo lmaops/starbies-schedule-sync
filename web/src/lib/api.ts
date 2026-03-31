@@ -50,12 +50,24 @@ export interface OnboardingStatus {
   has_successful_scrape: boolean
 }
 
+function handleBotBarrier(): never {
+  sessionStorage.setItem('returnPath', window.location.pathname + window.location.search)
+  window.location.href = '/'
+  throw new Error('Bot barrier challenge required')
+}
+
 async function request<T>(path: string, options: RequestInit = {}, redirectOn401 = true): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
   })
+
+  const contentType = res.headers.get('content-type') ?? ''
+  if (!contentType.includes('application/json')) {
+    handleBotBarrier()
+  }
+
   if (res.status === 401) {
     if (redirectOn401) window.location.href = '/login'
     throw new Error('Not authenticated')
