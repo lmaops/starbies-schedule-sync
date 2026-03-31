@@ -57,7 +57,11 @@ func (s *Server) Run(addr string) error {
 
 func (s *Server) setupRoutes() *gin.Engine {
 	r := gin.Default()
-	r.SetTrustedProxies([]string{"127.0.0.1", "::1"})
+	trustedProxies := make([]string, len(s.internalCIDRs))
+	for i, cidr := range s.internalCIDRs {
+		trustedProxies[i] = cidr.String()
+	}
+	r.SetTrustedProxies(trustedProxies)
 
 	staticContent, err := fs.Sub(staticFS, "static")
 	if err != nil {
