@@ -328,14 +328,13 @@ async function run() {
         if (link) link.click();
       });
 
-      // Security question
-      await typeInto(page, ['input[type="password"]'],
-        findSecurityAnswer(
-          await evaluate(page, () => document.body.innerText).catch(() => ''),
-          securityQuestions,
-        ),
-        { label: 'security-answer' },
+      // Security question — wait for the page to load before reading question text
+      await findVisibleInput(page, ['input[type="password"]'], { label: 'security-answer' });
+      const securityAnswer = findSecurityAnswer(
+        await evaluate(page, () => document.body.innerText).catch(() => ''),
+        securityQuestions,
       );
+      await typeInto(page, ['input[type="password"]'], securityAnswer, { label: 'security-answer' });
       await screenshot(page, 'security-question');
       await submitForm(page);
 
