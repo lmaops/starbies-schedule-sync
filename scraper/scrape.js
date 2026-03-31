@@ -4,25 +4,23 @@
 /**
  * Starbucks schedule scraper module.
  *
- * Fetches credentials from the app API using the scrape key:
+ * Fetches credentials from the app API:
  *   GET {SCRAPE_API_URL}/internal/scrape/{SCRAPE_KEY}/credentials
- *   -> { "username": "...", "password": "...", "security_questions": [...] }
+ *
+ * On success: POSTs shifts to /internal/scrape/{SCRAPE_KEY}/shifts
+ * On failure: POSTs logs + screenshots to /internal/scrape/{SCRAPE_KEY}/failure
  *
  * Env vars:
  *   SCRAPE_KEY      — unique key for this scrape run (required)
  *   SCRAPE_API_URL  — base URL of the app API for callbacks (required)
- *
- * On success: POSTs shifts to {SCRAPE_API_URL}/internal/scrape/{SCRAPE_KEY}/shifts
- * On failure: POSTs logs + screenshots to {SCRAPE_API_URL}/internal/scrape/{SCRAPE_KEY}/failure
- *
- * Exits 0 on success, 1 on failure.
  */
 
 const puppeteer = require('puppeteer');
 
-const STARBUCKS_LOGIN_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/rp/login';
-const STARBUCKS_HOME_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/portal';
-const STARBUCKS_SCHEDULE_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/portal/page?libraryContext=84bf32f75f0f0a6c1e719ee3bd358e7fc5a5eb2c8ecbff333a1280869185e4cf&menu=Partner-Self-Service-MeZVjkkVQXSIxAIfoPKGvA#wfmess-myschedule////';
+const LOGIN_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/rp/login';
+const HOME_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/portal';
+const SCHEDULE_URL = 'https://starbucks-wfmr.jdadelivers.com/retail/portal/page?libraryContext=84bf32f75f0f0a6c1e719ee3bd358e7fc5a5eb2c8ecbff333a1280869185e4cf&menu=Partner-Self-Service-MeZVjkkVQXSIxAIfoPKGvA#wfmess-myschedule////';
+const TARGET_DOMAIN = 'starbucks-wfmr.jdadelivers.com';
 const WEEKS_EACH_DIRECTION = 1;
 
 const SCRAPE_KEY = process.env.SCRAPE_KEY;
@@ -33,7 +31,7 @@ if (!SCRAPE_KEY || !SCRAPE_API_URL) {
   process.exit(1);
 }
 
-// ── Logging & diagnostics ──────────────────────────────────────────────
+// ── Diagnostics ────────────────────────────────────────────────────────
 
 const logLines = [];
 const screenshots = [];
@@ -46,17 +44,17 @@ const log = (...args) => {
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-async function takeScreenshot(page, label) {
+async function screenshot(page, label) {
   try {
     const b64 = await page.screenshot({ encoding: 'base64', type: 'png' });
     screenshots.push({ label, data: b64 });
-    log(`Screenshot captured: ${label}`);
+    log(`Screenshot: ${label}`);
   } catch (e) {
     log(`Screenshot failed (${label}): ${e.message}`);
   }
 }
 
-// ── API helpers ────────────────────────────────────────────────────────
+// ── API ────────────────────────────────────────────────────────────────
 
 async function postJSON(path, body) {
   const url = `${SCRAPE_API_URL}${path}`;
@@ -65,42 +63,143 @@ async function postJSON(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    throw new Error(`POST ${url} returned ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`POST ${url} returned ${res.status}`);
   return res.json();
 }
 
 async function fetchCredentials() {
   const url = `${SCRAPE_API_URL}/internal/scrape/${SCRAPE_KEY}/credentials`;
   const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!res.ok) {
-    throw new Error(`GET ${url} returned ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`GET ${url} returned ${res.status}`);
   return res.json();
 }
 
-// ── Schedule data helpers ──────────────────────────────────────────────
+// ── Page helpers ───────────────────────────────────────────────────────
+// Every helper that reads from or acts on the page retries once after a
+// short settle delay.  This guards against the navigation race condition
+// where Puppeteer's execution context is briefly invalid after a redirect
+// even though networkidle2 has fired.
 
-function findSecurityAnswer(pageText, securityQuestions) {
+/** Retry-safe page title fetch. */
+async function getTitle(page) {
+  try {
+    return await page.title();
+  } catch (_) {
+    await delay(500);
+    return await page.title().catch(() => '');
+  }
+}
+
+/** Retry-safe page.evaluate wrapper. */
+async function evaluate(page, fn, ...args) {
+  try {
+    return await page.evaluate(fn, ...args);
+  } catch (_) {
+    await delay(500);
+    return await page.evaluate(fn, ...args);
+  }
+}
+
+/**
+ * Wait for one of `selectors` to be visible, then return the first
+ * visible element handle.  Throws with a screenshot on failure.
+ */
+async function findVisibleInput(page, selectors, { timeout = 15000, label = 'input' } = {}) {
+  await page.waitForFunction(
+    (sels) => {
+      for (const sel of sels) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) return true;
+      }
+      return false;
+    },
+    { timeout },
+    selectors,
+  );
+
+  // Small settle delay for any JS init after the element appears
+  await delay(500);
+
+  for (const sel of selectors) {
+    const el = await page.$(sel);
+    if (el && await el.isIntersectingViewport().catch(() => false)) return el;
+  }
+
+  await screenshot(page, `${label}-not-found`);
+  throw new Error(`No visible ${label} found (tried: ${selectors.join(', ')})`);
+}
+
+/** Type into a field with human-like delay. */
+async function typeInto(page, selectors, text, opts = {}) {
+  const el = await findVisibleInput(page, selectors, opts);
+  await el.type(text, { delay: 50 });
+  return el;
+}
+
+/** Find and click a submit button, or press Enter.  Waits for navigation. */
+async function submitForm(page) {
+  const btn = await page.$('input[type="submit"], button[type="submit"], button');
+  if (btn) {
+    await Promise.all([
+      btn.click(),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+    ]);
+  } else {
+    await Promise.all([
+      page.keyboard.press('Enter'),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+    ]);
+  }
+}
+
+/**
+ * Click `selector` and wait for a matching API response.
+ * Returns the response or null on timeout.
+ */
+async function clickAndWaitForAPI(page, selector, urlPattern, { timeout = 8000, settleMs = 1000 } = {}) {
+  await delay(settleMs);
+  const responsePromise = page.waitForResponse(
+    r => r.url().includes(urlPattern) && r.status() === 200,
+    { timeout },
+  ).catch(() => null);
+  await page.click(selector);
+  return responsePromise;
+}
+
+/**
+ * Poll until `checkFn(page)` returns truthy, up to `maxMs`.
+ * Returns the truthy value, or null on timeout.
+ */
+async function pollUntil(page, checkFn, { maxMs = 60000, intervalMs = 500 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const result = await checkFn(page);
+    if (result) return result;
+    await delay(intervalMs);
+  }
+  return null;
+}
+
+// ── Data helpers ───────────────────────────────────────────────────────
+
+function findSecurityAnswer(pageText, questions) {
   const normalized = pageText.toLowerCase();
-  for (const entry of securityQuestions) {
+  for (const entry of questions) {
     if (entry.question && normalized.includes(entry.question.toLowerCase())) {
       log(`Matched security question: "${entry.question}"`);
       return entry.answer;
     }
   }
-  log('No security question matched page text; using first entry as fallback');
-  return securityQuestions[0].answer;
+  log('No security question matched; using first entry');
+  return questions[0].answer;
 }
 
-function mergeScheduleData(weeksData) {
-  if (weeksData.length === 0) return { days: [], homeSite: null };
-  const merged = { ...weeksData[0], days: [] };
+function mergeScheduleData(weeks) {
+  if (!weeks.length) return { days: [], homeSite: null };
+  const merged = { ...weeks[0], days: [] };
   const seen = new Set();
-  for (const week of weeksData) {
-    if (!week.days) continue;
-    for (const day of week.days) {
+  for (const week of weeks) {
+    for (const day of week.days || []) {
       if (!seen.has(day.businessDate)) {
         seen.add(day.businessDate);
         merged.days.push(day);
@@ -111,13 +210,12 @@ function mergeScheduleData(weeksData) {
   return merged;
 }
 
-function extractShifts(scheduleData) {
+function extractShifts(data) {
   const shifts = [];
-  if (!scheduleData.days) return shifts;
-  const location = scheduleData.homeSite?.name || 'Work';
-  for (const day of scheduleData.days) {
-    if (!day.payScheduledShifts?.length) continue;
-    for (const shift of day.payScheduledShifts) {
+  if (!data.days) return shifts;
+  const location = data.homeSite?.name || 'Work';
+  for (const day of data.days) {
+    for (const shift of day.payScheduledShifts || []) {
       shifts.push({
         start: shift.start,
         end: shift.end,
@@ -131,159 +229,31 @@ function extractShifts(scheduleData) {
   return shifts;
 }
 
-// ── Auth helpers ───────────────────────────────────────────────────────
+// ── Username input selectors (broadest set that works) ─────────────────
 
-async function submitForm(page) {
-  const submitBtn = await page.$('input[type="submit"], button[type="submit"], button');
-  if (submitBtn) {
-    await Promise.all([
-      submitBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-    ]);
-  } else {
-    await Promise.all([
-      page.keyboard.press('Enter'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-    ]);
-  }
-}
-
-async function handleSASLogin(page, username) {
-  log('SAS Level 3 login detected, entering username...');
-
-  await page.waitForFunction(
-    (sels) => {
-      for (const sel of sels) {
-        const elem = document.querySelector(sel);
-        if (elem && elem.offsetParent !== null) return true;
-      }
-      return false;
-    },
-    { timeout: 15000 },
-    ['input[type="text"]', 'input[type="password"]', 'input[name="username"]',
-     'input[name="user"]', 'input.username', 'input#username',
-     'form input:not([type="submit"]):not([type="button"]):not([type="hidden"])']
-  );
-
-  await delay(1000);
-
-  const selectors = [
-    'input[type="text"]', 'input[name="username"]', 'input#username',
-    'input[name="user"]', 'input.username',
-    'form input:not([type="submit"]):not([type="button"]):not([type="hidden"])',
-  ];
-  let inputField = null;
-  for (const sel of selectors) {
-    const el = await page.$(sel);
-    if (el && await el.isIntersectingViewport()) { inputField = el; break; }
-  }
-  if (!inputField) throw new Error('Could not find username input on SAS page');
-
-  await inputField.type(username, { delay: 50 });
-  log('Username entered, submitting...');
-  await submitForm(page);
-  log('SAS login form submitted');
-}
-
-async function bypassPushNotification(page, password, securityQuestions) {
-  log('Push notification page detected, using security question bypass...');
-  await takeScreenshot(page, 'push-notification-page');
-
-  // Click "Device too far away" link
-  await page.evaluate(() => {
-    const link = Array.from(document.querySelectorAll('a'))
-      .find(a => a.textContent.includes('Device too far away'));
-    if (link) link.click();
-  });
-
-  // Wait for and fill security question
-  await page.waitForSelector('input[type="password"]', { visible: true, timeout: 15000 });
-  const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
-  const answer = findSecurityAnswer(pageText, securityQuestions);
-  log('Entering security question answer...');
-  const secField = await page.$('input[type="password"]');
-  await secField.type(answer, { delay: 50 });
-  await takeScreenshot(page, 'security-question');
-  await submitForm(page);
-
-  // Wait for and fill password
-  await page.waitForSelector('input[type="password"]', { visible: true, timeout: 15000 });
-  log('Entering password...');
-  const pwField = await page.$('input[type="password"]');
-  await pwField.type(password, { delay: 50 });
-  await takeScreenshot(page, 'password-entry');
-  await submitForm(page);
-
-  log('Push notification bypass complete');
-}
-
-async function waitForAuthentication(page, password, securityQuestions) {
-  log('Waiting for authentication...');
-  const targetDomain = 'starbucks-wfmr.jdadelivers.com';
-  const maxWait = 60000;
-  const start = Date.now();
-
-  while (Date.now() - start < maxWait) {
-    if (page.url().includes(targetDomain)) {
-      log('Authenticated successfully');
-      return;
-    }
-
-    const hasDeviceTooFar = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('a'))
-        .some(a => a.textContent.includes('Device too far away'))
-    ).catch(() => false);
-
-    if (hasDeviceTooFar) {
-      await bypassPushNotification(page, password, securityQuestions);
-      return;
-    }
-
-    await delay(500);
-  }
-
-  log('Authentication timeout - continuing anyway');
-}
-
-// ── Schedule navigation ────────────────────────────────────────────────
-
-async function clickWeekButton(page, selector, label) {
-  await delay(1000);
-  log(`${label}: Clicking...`);
-
-  const responsePromise = page.waitForResponse(
-    r => r.url().includes('/mySchedules/') && r.status() === 200,
-    { timeout: 8000 },
-  ).catch(() => {
-    log(`${label}: Response timeout (continuing)`);
-    return null;
-  });
-
-  await page.click(selector);
-  const response = await responsePromise;
-
-  if (response) {
-    log(`${label}: API response received`);
-  }
-}
+const USERNAME_SELECTORS = [
+  'input[type="text"]',
+  'input[name="username"]',
+  'input#username',
+  'input[name="user"]',
+  'input.username',
+  'form input:not([type="submit"]):not([type="button"]):not([type="hidden"])',
+];
 
 // ── Main ───────────────────────────────────────────────────────────────
 
 async function run() {
-  // Fetch credentials from the service
   log('Fetching credentials...');
   const creds = await fetchCredentials();
   const { username, password, security_questions: securityQuestions } = creds;
-
   if (!username || !password || !securityQuestions?.length) {
     throw new Error('Missing required credential fields');
   }
 
   log('Launching browser...');
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
   const browser = await puppeteer.launch({
     headless: true,
-    executablePath,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -296,98 +266,125 @@ async function run() {
     const page = await browser.newPage();
     const capturedWeeks = [];
 
-    // Set up response listener to capture schedule API responses
+    // Intercept schedule API responses as they come in
     page.on('response', async response => {
-      if (response.url().includes('/mySchedules/')) {
-        try {
-          const data = await response.json();
-          if (data?.days) {
-            capturedWeeks.push(data);
-            log(`Captured week data (${data.days.length} days), total: ${capturedWeeks.length}`);
-          }
-        } catch (_) {}
-      }
+      if (!response.url().includes('/mySchedules/')) return;
+      try {
+        const data = await response.json();
+        if (data?.days) {
+          capturedWeeks.push(data);
+          log(`Captured week (${data.days.length} days), total: ${capturedWeeks.length}`);
+        }
+      } catch (_) {}
     });
 
-    // Step 1: Navigate to login
+    // ── Step 1: Login page ─────────────────────────────────────────────
+
     log('Navigating to login page...');
-    await page.goto(STARBUCKS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-    await takeScreenshot(page, 'login-page');
+    await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    await screenshot(page, 'login-page');
 
-    // Check if we're on the SAS Level 3 login page
-    // Retry title fetch — page context may still be settling after redirect
-    let pageTitle = '';
-    try {
-      pageTitle = await page.title();
-    } catch (_) {
-      await delay(500);
-      pageTitle = await page.title().catch(() => '');
+    const title = await getTitle(page);
+    if (title.includes('SAS - Level 3')) {
+      log('SAS login detected, entering username...');
+      await typeInto(page, USERNAME_SELECTORS, username, { label: 'username' });
+      await submitForm(page);
+      await screenshot(page, 'after-username');
     }
 
-    if (pageTitle.includes('SAS - Level 3')) {
-      await handleSASLogin(page, username);
-      await takeScreenshot(page, 'after-sas-username');
+    // ── Step 2: Authentication ─────────────────────────────────────────
+
+    log('Waiting for authentication...');
+    const authenticated = await pollUntil(page, async (p) => {
+      // Already on the target domain means we're through
+      if (p.url().includes(TARGET_DOMAIN)) return 'domain';
+
+      // Check for push notification bypass opportunity
+      const hasBypass = await evaluate(p, () =>
+        Array.from(document.querySelectorAll('a'))
+          .some(a => a.textContent.includes('Device too far away'))
+      ).catch(() => false);
+      if (hasBypass) return 'bypass';
+
+      return false;
+    });
+
+    if (authenticated === 'bypass') {
+      log('Bypassing push notification via security question...');
+      await screenshot(page, 'push-notification');
+
+      await evaluate(page, () => {
+        const link = Array.from(document.querySelectorAll('a'))
+          .find(a => a.textContent.includes('Device too far away'));
+        if (link) link.click();
+      });
+
+      // Security question
+      await typeInto(page, ['input[type="password"]'],
+        findSecurityAnswer(
+          await evaluate(page, () => document.body.innerText).catch(() => ''),
+          securityQuestions,
+        ),
+        { label: 'security-answer' },
+      );
+      await screenshot(page, 'security-question');
+      await submitForm(page);
+
+      // Password
+      log('Entering password...');
+      await typeInto(page, ['input[type="password"]'], password, { label: 'password' });
+      await screenshot(page, 'password-entry');
+      await submitForm(page);
+    } else if (authenticated === 'domain') {
+      log('Authenticated (redirected to portal)');
+    } else {
+      log('Authentication timeout — continuing anyway');
     }
 
-    // Step 2: Wait for auth (push notification bypass or manual)
-    await waitForAuthentication(page, password, securityQuestions);
-    await takeScreenshot(page, 'post-auth');
+    await screenshot(page, 'post-auth');
 
-    // Step 3: Navigate to schedule page
-    log('Navigating to home page...');
-    await page.goto(STARBUCKS_HOME_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    // ── Step 3: Navigate to schedule ───────────────────────────────────
 
     log('Navigating to schedule page...');
-    await page.evaluate(url => { window.location.href = url; }, STARBUCKS_SCHEDULE_URL);
+    await page.goto(HOME_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    await evaluate(page, url => { window.location.href = url; }, SCHEDULE_URL);
 
-    // Wait for navigation buttons to confirm schedule SPA has loaded
-    try {
-      await page.waitForSelector('#button-1028', { visible: true, timeout: 15000 });
-      await page.waitForSelector('#button-1029', { visible: true, timeout: 15000 });
-      log('Schedule page loaded');
-    } catch (error) {
-      await takeScreenshot(page, 'schedule-load-failed');
-      throw new Error('Navigation buttons not found - schedule page failed to load');
-    }
-    await takeScreenshot(page, 'schedule-page');
+    const prevBtn = await findVisibleInput(page, ['#button-1028'], { label: 'prev-week button', timeout: 15000 })
+      .catch(async (err) => { await screenshot(page, 'schedule-load-failed'); throw err; });
+    await findVisibleInput(page, ['#button-1029'], { label: 'next-week button', timeout: 15000 });
+    log('Schedule page loaded');
+    await screenshot(page, 'schedule-page');
 
-    // Step 4: Navigate weeks to capture schedule data
-    // Go backward
+    // ── Step 4: Capture schedule weeks ─────────────────────────────────
+
     for (let i = 0; i < WEEKS_EACH_DIRECTION; i++) {
-      await clickWeekButton(page, '#button-1028', `← week -${i + 1}`);
+      await clickAndWaitForAPI(page, '#button-1028', '/mySchedules/');
+      log(`← week -${i + 1}`);
     }
-    // Go forward (double to get back to center and ahead)
     for (let i = 0; i < WEEKS_EACH_DIRECTION * 2; i++) {
-      await clickWeekButton(page, '#button-1029', `→ week +${i + 1}`);
+      await clickAndWaitForAPI(page, '#button-1029', '/mySchedules/');
+      log(`→ week +${i + 1}`);
     }
 
-    // Wait for any trailing responses
-    const expectedWeeks = (WEEKS_EACH_DIRECTION * 2) + 1;
-    let waitAttempts = 0;
-    while (capturedWeeks.length < expectedWeeks && waitAttempts < 10) {
-      await delay(500);
-      waitAttempts++;
+    // Wait for any trailing API responses
+    const expected = (WEEKS_EACH_DIRECTION * 2) + 1;
+    await pollUntil(page, () => capturedWeeks.length >= expected, { maxMs: 5000 });
+    if (capturedWeeks.length < expected) {
+      log(`Warning: expected ${expected} weeks but captured ${capturedWeeks.length}`);
     }
+    await screenshot(page, 'schedule-captured');
 
-    if (capturedWeeks.length < expectedWeeks) {
-      log(`Warning: expected ${expectedWeeks} weeks but captured ${capturedWeeks.length}`);
-    }
-    await delay(500);
-    await takeScreenshot(page, 'schedule-captured');
+    // ── Step 5: Submit results ─────────────────────────────────────────
 
-    log(`Total weeks captured: ${capturedWeeks.length}`);
-
-    // Merge and extract shifts
     const merged = mergeScheduleData(capturedWeeks);
     const shifts = extractShifts(merged);
-    log(`Shifts found: ${shifts.length}`);
+    log(`${capturedWeeks.length} weeks, ${shifts.length} shifts`);
 
-    // POST results to the API
     await postJSON(`/internal/scrape/${SCRAPE_KEY}/shifts`, {
       shifts,
       home_site: merged.homeSite?.name || null,
     });
-    log('Shifts submitted to API successfully');
+    log('Shifts submitted successfully');
 
   } finally {
     await browser.close();
