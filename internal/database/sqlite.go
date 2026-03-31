@@ -50,6 +50,7 @@ func Migrate(db *sql.DB) error {
 		`DROP TABLE IF EXISTS schedules`,
 		`ALTER TABLE scrape_logs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE scrape_logs ADD COLUMN is_auto INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE scrape_logs ADD COLUMN credentials_fetched_at INTEGER`,
 	}
 	for _, stmt := range additions {
 		if _, err := db.Exec(stmt); err != nil {

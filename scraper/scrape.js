@@ -5,10 +5,11 @@
  * Starbucks schedule scraper module.
  *
  * Fetches credentials from the app API:
- *   GET {SCRAPE_API_URL}/internal/scrape/{SCRAPE_KEY}/credentials
+ *   GET {SCRAPE_API_URL}/internal/scrape/credentials
+ *   Header: X-Scrape-Key: {SCRAPE_KEY}
  *
- * On success: POSTs shifts to /internal/scrape/{SCRAPE_KEY}/shifts
- * On failure: POSTs logs + screenshots to /internal/scrape/{SCRAPE_KEY}/failure
+ * On success: POSTs shifts to /internal/scrape/shifts (X-Scrape-Key header)
+ * On failure: POSTs logs + screenshots to /internal/scrape/failure (X-Scrape-Key header)
  *
  * Env vars:
  *   SCRAPE_KEY      — unique key for this scrape run (required)
@@ -60,7 +61,10 @@ async function postJSON(path, body) {
   const url = `${SCRAPE_API_URL}${path}`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Scrape-Key': SCRAPE_KEY,
+    },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST ${url} returned ${res.status}`);
@@ -68,8 +72,13 @@ async function postJSON(path, body) {
 }
 
 async function fetchCredentials() {
-  const url = `${SCRAPE_API_URL}/internal/scrape/${SCRAPE_KEY}/credentials`;
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  const url = `${SCRAPE_API_URL}/internal/scrape/credentials`;
+  const res = await fetch(url, {
+    headers: {
+      'Accept': 'application/json',
+      'X-Scrape-Key': SCRAPE_KEY,
+    },
+  });
   if (!res.ok) throw new Error(`GET ${url} returned ${res.status}`);
   return res.json();
 }
@@ -380,7 +389,7 @@ async function run() {
     const shifts = extractShifts(merged);
     log(`${capturedWeeks.length} weeks, ${shifts.length} shifts`);
 
-    await postJSON(`/internal/scrape/${SCRAPE_KEY}/shifts`, {
+    await postJSON(`/internal/scrape/shifts`, {
       shifts,
       home_site: merged.homeSite?.name || null,
     });
@@ -394,7 +403,7 @@ async function run() {
 run().catch(async err => {
   log(`Error: ${err.message}`);
   try {
-    await postJSON(`/internal/scrape/${SCRAPE_KEY}/failure`, {
+    await postJSON(`/internal/scrape/failure`, {
       logs: logLines,
       screenshots: screenshots.map(s => s.data),
     });

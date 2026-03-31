@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS scrape_logs (
     error_message TEXT,
     container_id TEXT,
     scrape_key TEXT,
+    credentials_fetched_at INTEGER,
     log_output TEXT,
     failure_screenshots TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,

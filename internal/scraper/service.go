@@ -178,7 +178,7 @@ func (s *ScraperService) runScrapeContainer(ctx context.Context, userID, logID u
 			},
 		},
 		HostConfig: &mobyContainer.HostConfig{
-			NetworkMode: "sbuxsync_scraper-exec",
+			NetworkMode: "scraper-exec",
 			AutoRemove:  true,
 			Binds:       []string{"/usr/share/zoneinfo/" + tzName + ":/etc/localtime:ro"},
 		},

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -15,34 +16,36 @@ import (
 )
 
 type Server struct {
-	db           *sql.DB
-	crypto       *appCrypto.EnvelopeCrypto
-	scraper      *scraper.ScraperService
-	router       *gin.Engine
-	pinStore     *auth.PinStore
-	pinRequestRL *auth.RateLimiter
-	pinVerifyRL  *auth.RateLimiter
-	credentialRL *auth.RateLimiter // per-user: 1 request per 30s
-	scrapeRL     *auth.RateLimiter // per-user: 10 scrapes per 48h
-	icsRL        *auth.RateLimiter // per-IP: brute-force protection on ICS tokens
+	db            *sql.DB
+	crypto        *appCrypto.EnvelopeCrypto
+	scraper       *scraper.ScraperService
+	router        *gin.Engine
+	pinStore      *auth.PinStore
+	pinRequestRL  *auth.RateLimiter
+	pinVerifyRL   *auth.RateLimiter
+	credentialRL  *auth.RateLimiter // per-user: 1 request per 30s
+	scrapeRL      *auth.RateLimiter // per-user: 10 scrapes per 48h
+	icsRL         *auth.RateLimiter // per-IP: brute-force protection on ICS tokens
+	internalCIDRs []*net.IPNet
 }
 
-func NewServer(db *sql.DB, mekHex string, scraperSvc *scraper.ScraperService, pinStore *auth.PinStore, pinRequestRL, pinVerifyRL, credentialRL, scrapeRL, icsRL *auth.RateLimiter) *Server {
+func NewServer(db *sql.DB, mekHex string, scraperSvc *scraper.ScraperService, pinStore *auth.PinStore, pinRequestRL, pinVerifyRL, credentialRL, scrapeRL, icsRL *auth.RateLimiter, internalCIDRs []*net.IPNet) *Server {
 	ec, err := appCrypto.New(mekHex)
 	if err != nil {
 		panic("invalid MEK: " + err.Error())
 	}
 
 	s := &Server{
-		db:           db,
-		crypto:       ec,
-		scraper:      scraperSvc,
-		pinStore:     pinStore,
-		pinRequestRL: pinRequestRL,
-		pinVerifyRL:  pinVerifyRL,
-		credentialRL: credentialRL,
-		scrapeRL:     scrapeRL,
-		icsRL:        icsRL,
+		db:            db,
+		crypto:        ec,
+		scraper:       scraperSvc,
+		pinStore:      pinStore,
+		pinRequestRL:  pinRequestRL,
+		pinVerifyRL:   pinVerifyRL,
+		credentialRL:  credentialRL,
+		scrapeRL:      scrapeRL,
+		icsRL:         icsRL,
+		internalCIDRs: internalCIDRs,
 	}
 	s.router = s.setupRoutes()
 	return s
@@ -64,7 +67,6 @@ func (s *Server) setupRoutes() *gin.Engine {
 	// Config (public)
 	r.GET("/api/config", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"dev_mode":   isDevMode(),
 			"commit_sha": CommitSHA,
 			"commit_url": CommitURL,
 		})
@@ -77,7 +79,6 @@ func (s *Server) setupRoutes() *gin.Engine {
 		a.POST("/verify-pin", s.pinVerifyRL.Middleware(), s.verifyPin)
 		a.POST("/logout", s.logout)
 		a.GET("/me", s.authMiddleware(), s.me)
-		a.POST("/dev-login", s.devLogin)
 	}
 
 	// Authenticated app routes
@@ -94,12 +95,12 @@ func (s *Server) setupRoutes() *gin.Engine {
 		api.GET("/onboarding-status", s.onboardingStatus)
 	}
 
-	// scrape callback routes — auth via scrape key, body limited to 5MB
-	internal := r.Group("/internal", maxBodySize(5<<20))
+	// scrape callback routes — auth via X-Scrape-Key header, body limited to 5MB, internal IPs only
+	internal := r.Group("/internal", maxBodySize(5<<20), s.internalOnly())
 	{
-		internal.GET("/scrape/:key/credentials", s.scrapeGetCredentials)
-		internal.POST("/scrape/:key/shifts", s.scrapeSubmitShifts)
-		internal.POST("/scrape/:key/failure", s.scrapeSubmitFailure)
+		internal.GET("/scrape/credentials", s.scrapeGetCredentials)
+		internal.POST("/scrape/shifts", s.scrapeSubmitShifts)
+		internal.POST("/scrape/failure", s.scrapeSubmitFailure)
 	}
 
 	// .ics feed — auth via url token, rate limited per IP against brute-forcing
@@ -188,6 +189,24 @@ func maxBodySize(n int64) gin.HandlerFunc {
 	}
 }
 
+// middleware that restricts access to internal CIDRs only
+func (s *Server) internalOnly() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ip := net.ParseIP(c.ClientIP())
+		if ip == nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid client IP"})
+			return
+		}
+		for _, cidr := range s.internalCIDRs {
+			if cidr.Contains(ip) {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "access denied"})
+	}
+}
+
 // auth handlers
 
 func (s *Server) requestPin(c *gin.Context) {
@@ -249,6 +268,7 @@ func (s *Server) verifyPin(c *gin.Context) {
 		return
 	}
 
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(auth.CookieName, token, int((90 * 24 * time.Hour).Seconds()), "/", "", true, true)
 	c.JSON(http.StatusOK, user)
 }
@@ -264,29 +284,5 @@ func (s *Server) logout(c *gin.Context) {
 
 func (s *Server) me(c *gin.Context) {
 	user := c.MustGet("user").(*models.User)
-	c.JSON(http.StatusOK, user)
-}
-
-func (s *Server) devLogin(c *gin.Context) {
-	if !isDevMode() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
-	user, err := auth.FindOrCreateUser(c.Request.Context(), s.db, "singleuser@localhost.localdomain")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create dev user"})
-		return
-	}
-	if _, err := s.db.ExecContext(c.Request.Context(), `UPDATE users SET is_admin = 1 WHERE id = ?`, user.ID.String()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not set admin"})
-		return
-	}
-	user.IsAdmin = true
-	token, err := auth.CreateSession(c.Request.Context(), s.db, user.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create session"})
-		return
-	}
-	c.SetCookie(auth.CookieName, token, int((90 * 24 * time.Hour).Seconds()), "/", "", false, true)
 	c.JSON(http.StatusOK, user)
 }

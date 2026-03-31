@@ -35,17 +35,27 @@ type callbackShift struct {
 	Location   string  `json:"location"`
 }
 
-// fetches credentials for the scraper container by scrape key
+// fetches credentials for the scraper container by scrape key (single-use, from header)
 func (s *Server) scrapeGetCredentials(c *gin.Context) {
-	key := c.Param("key")
+	key := c.GetHeader("X-Scrape-Key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing X-Scrape-Key header"})
+		return
+	}
 	ctx := c.Request.Context()
 
 	var userID string
+	var credentialsFetchedAt *int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT user_id FROM scrape_logs WHERE scrape_key = ? AND status = 'running'`, key,
-	).Scan(&userID)
+		`SELECT user_id, credentials_fetched_at FROM scrape_logs WHERE scrape_key = ? AND status = 'running'`, key,
+	).Scan(&userID, &credentialsFetchedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "invalid or expired scrape key"})
+		return
+	}
+
+	if credentialsFetchedAt != nil {
+		c.JSON(http.StatusGone, gin.H{"error": "credentials already fetched for this scrape"})
 		return
 	}
 
@@ -61,12 +71,19 @@ func (s *Server) scrapeGetCredentials(c *gin.Context) {
 		return
 	}
 
+	// Mark credentials as fetched (single-use)
+	s.db.ExecContext(ctx, `UPDATE scrape_logs SET credentials_fetched_at = ? WHERE scrape_key = ?`, time.Now().UTC().Unix(), key)
+
 	c.JSON(http.StatusOK, creds)
 }
 
 // receives found shifts from the scraper container on success
 func (s *Server) scrapeSubmitShifts(c *gin.Context) {
-	key := c.Param("key")
+	key := c.GetHeader("X-Scrape-Key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing X-Scrape-Key header"})
+		return
+	}
 	ctx := c.Request.Context()
 
 	var logID, userID string
@@ -144,7 +161,11 @@ func (s *Server) scrapeSubmitShifts(c *gin.Context) {
 
 // receives failure logs and screenshots from the scraper container
 func (s *Server) scrapeSubmitFailure(c *gin.Context) {
-	key := c.Param("key")
+	key := c.GetHeader("X-Scrape-Key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing X-Scrape-Key header"})
+		return
+	}
 	ctx := c.Request.Context()
 
 	var logID, userID string
