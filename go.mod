@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/moby/moby/api v1.54.0
 	github.com/moby/moby/client v0.3.0
-	modernc.org/sqlite v1.48.0
+	modernc.org/sqlite v1.49.1
 )
 
 require (
@@ -65,7 +65,7 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	modernc.org/libc v1.70.0 // indirect
+	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
